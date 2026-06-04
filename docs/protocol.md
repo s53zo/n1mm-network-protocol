@@ -79,9 +79,11 @@ Use the terminator `%~__DATA`, not only `__DATA`, to find complete frames.
 A practical startup sequence for a virtual station is:
 
 1. Start a TCP listener on `12070`.
-2. Send UDP discovery beacons to local broadcast addresses on `12070`.
-3. Optionally open outbound TCP links to known peer stations.
-4. On a new TCP link, send a small hello/status burst:
+2. Listen for UDP discovery advertisements on `12070`.
+3. Add heard stations as outbound TCP peers using the advertised IP and port.
+4. Send UDP discovery beacons to local broadcast addresses on `12070`.
+5. Optionally open outbound TCP links to manually configured peer stations.
+6. On a new TCP link, send a small hello/status burst:
 
 ```text
 DATA__00%N1MMVIRT%ECHOREQ%2026-06-02%12:00:00%~__DATA
@@ -113,6 +115,10 @@ watches for `MASTER`, then copies the named station's `CONTESTNAME` and `STATUS`
 fields into later virtual-station announcements. Use
 `--mimic-source-station <station>` when the master station name is already
 known.
+
+The sample listens for UDP discovery and connects to heard stations by default.
+Use `--no-auto-discover` to disable that behavior and rely only on explicit
+`--peer` values.
 
 ## Keepalive and Working State
 

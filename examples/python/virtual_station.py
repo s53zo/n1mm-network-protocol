@@ -24,7 +24,7 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from n1mm_protocol import ALL_NUL_PAYLOAD, build_discovery, build_frame, parse_frames  # noqa: E402
+from n1mm_protocol import ALL_NUL_PAYLOAD, build_discovery, build_frame, parse_discovery, parse_frames  # noqa: E402
 
 
 def now_parts() -> tuple[str, str]:
@@ -71,6 +71,7 @@ class Config:
     beacon_interval: float
     hello_interval: float
     reconnect_interval: float
+    auto_discover: bool
     passive: bool
     connect_out: bool
     send_null_response: bool
@@ -96,6 +97,7 @@ class VirtualStation:
         self.connections: dict[socket.socket, PeerConnection] = {}
         self.lock = threading.Lock()
         self.learned_master_station = cfg.mimic_source_station or None
+        self.dynamic_peers: dict[str, int] = {peer: cfg.port for peer in cfg.peers}
 
     def is_mimic_source(self, station: str) -> bool:
         return bool(
@@ -163,6 +165,25 @@ class VirtualStation:
             self.cfg.version,
             self.cfg.operator,
         )
+
+    def add_dynamic_peer(self, ip: str, port: int, source: str) -> None:
+        if not ip or ip in {self.cfg.advertise_ip, "127.0.0.1"}:
+            return
+        with self.lock:
+            previous = self.dynamic_peers.get(ip)
+            self.dynamic_peers[ip] = port
+        if previous != port:
+            logging.warning("learned peer %s:%d from %s", ip, port, source)
+
+    def handle_discovery_payload(self, payload: bytes, source_addr: tuple[str, int]) -> None:
+        try:
+            discovery = parse_discovery(payload)
+        except ValueError:
+            logging.debug("ignored non-discovery UDP from %s: %r", source_addr, preview(payload))
+            return
+        if discovery.station.upper() == self.cfg.station.upper():
+            return
+        self.add_dynamic_peer(discovery.ip, discovery.tcp_port, f"UDP discovery station={discovery.station}")
 
     def install_signals(self) -> None:
         def handler(signum: int, _frame: object) -> None:
@@ -351,12 +372,13 @@ class VirtualStation:
         while not self.stop_event.is_set():
             with self.lock:
                 names = {conn.name for conn in self.connections.values()}
-            for peer in self.cfg.peers:
-                name = f"out:{peer}:{self.cfg.port}"
+                peers = dict(self.dynamic_peers)
+            for peer, port in peers.items():
+                name = f"out:{peer}:{port}"
                 if name in names:
                     continue
                 try:
-                    sock = socket.create_connection((peer, self.cfg.port), timeout=5.0)
+                    sock = socket.create_connection((peer, port), timeout=5.0)
                     self.add_connection(sock, name, outgoing=True)
                 except OSError as exc:
                     logging.info("connect %s failed: %s", name, exc)
@@ -375,6 +397,27 @@ class VirtualStation:
                     except OSError as exc:
                         logging.warning("discovery to %s failed: %s", host, exc)
                 self.stop_event.wait(self.cfg.beacon_interval)
+        finally:
+            sock.close()
+
+    def udp_discovery_listener(self) -> None:
+        if not self.cfg.auto_discover:
+            return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", self.cfg.port))
+        sock.settimeout(1.0)
+        logging.warning("UDP discovery listening on 0.0.0.0:%d", self.cfg.port)
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    data, addr = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    logging.warning("UDP discovery receive failed: %s", exc)
+                    continue
+                self.handle_discovery_payload(data, addr)
         finally:
             sock.close()
 
@@ -417,6 +460,7 @@ class VirtualStation:
             threading.Thread(target=self.tcp_server, daemon=True),
             threading.Thread(target=self.outgoing_connector, daemon=True),
             threading.Thread(target=self.udp_beacon, daemon=True),
+            threading.Thread(target=self.udp_discovery_listener, daemon=True),
             threading.Thread(target=self.control_listener, daemon=True),
         ]
         for thread in threads:
@@ -463,6 +507,7 @@ def parse_args(argv: Iterable[str]) -> Config:
     parser.add_argument("--beacon-interval", type=float, default=10.0)
     parser.add_argument("--hello-interval", type=float, default=30.0)
     parser.add_argument("--reconnect-interval", type=float, default=5.0)
+    parser.add_argument("--no-auto-discover", action="store_true", help="do not listen for UDP discovery and auto-connect heard stations")
     parser.add_argument("--passive", action="store_true", help="monitor only; do not send hello/status bursts")
     parser.add_argument("--no-connect-out", action="store_true", help="do not open outbound TCP peer links")
     parser.add_argument("--six-nul-response", action="store_true", help="send observed six-NUL compatibility bytes after DATA frames")
@@ -496,6 +541,7 @@ def parse_args(argv: Iterable[str]) -> Config:
         beacon_interval=args.beacon_interval,
         hello_interval=args.hello_interval,
         reconnect_interval=args.reconnect_interval,
+        auto_discover=not args.no_auto_discover,
         passive=args.passive,
         connect_out=not args.no_connect_out,
         send_null_response=args.six_nul_response,

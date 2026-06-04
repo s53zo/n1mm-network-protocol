@@ -149,6 +149,40 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(app.learned_master_station, "N1MMA")
         self.assertEqual(cfg.contest, "CQWWCW")
 
+    def test_virtual_station_auto_discovers_udp_peers_by_default(self) -> None:
+        cfg = parse_args(["--advertise-ip", "192.0.2.50"])
+        app = VirtualStation(cfg)
+
+        app.handle_discovery_payload(
+            build_discovery("N1MMA", "192.0.2.10", 12070, "1.0.11229.0", "N0CALL"),
+            ("192.0.2.10", 12070),
+        )
+
+        self.assertTrue(cfg.auto_discover)
+        self.assertEqual(app.dynamic_peers["192.0.2.10"], 12070)
+
+    def test_virtual_station_uses_advertised_tcp_port_for_heard_station(self) -> None:
+        cfg = parse_args(["--advertise-ip", "192.0.2.50"])
+        app = VirtualStation(cfg)
+
+        app.handle_discovery_payload(
+            build_discovery("N1MMB", "192.0.2.20", 12123, "1.0.11229.0", "N0CALL"),
+            ("192.0.2.20", 12070),
+        )
+
+        self.assertEqual(app.dynamic_peers["192.0.2.20"], 12123)
+
+    def test_virtual_station_ignores_own_discovery(self) -> None:
+        cfg = parse_args(["--station", "N1MMVIRT", "--advertise-ip", "192.0.2.50"])
+        app = VirtualStation(cfg)
+
+        app.handle_discovery_payload(
+            build_discovery("N1MMVIRT", "192.0.2.50", 12070, "1.0.11229.0", "N0CALL"),
+            ("192.0.2.50", 12070),
+        )
+
+        self.assertEqual(app.dynamic_peers, {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,14 @@ python3 examples/python/virtual_station.py \
   --passive
 ```
 
+By default the virtual station listens for UDP discovery on port `12070` and
+opens outbound TCP links to stations it hears. If the auto-detected
+`--advertise-ip` is correct for your LAN, this is enough to join and learn:
+
+```sh
+python3 examples/python/virtual_station.py --mimic-master
+```
+
 Start an active virtual station that advertises itself and connects to a peer:
 
 ```sh
@@ -54,6 +62,9 @@ python3 examples/python/virtual_station.py \
   --contest CQWPXCW \
   --country-file-version CN
 ```
+
+`--peer` is still useful when you already know a station IP or when UDP
+broadcast discovery is blocked. Heard stations and explicit peers are both used.
 
 Learn the real master station's visible contest/status identity and mimic those
 values automatically:
@@ -114,6 +125,12 @@ python3 examples/python/virtual_station.py \
 Use `--master` only if you intentionally want the virtual station to announce
 itself as master. To mimic the master's settings while a real master is present,
 use `--mimic-master` without `--master`.
+
+To disable discovery-based peer learning:
+
+```sh
+python3 examples/python/virtual_station.py --no-auto-discover --peer 192.0.2.10
+```
 
 Ask the running virtual station to send an `XMIT` active/release burst:
 

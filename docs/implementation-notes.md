@@ -28,6 +28,8 @@ message body.
 For a useful test station:
 
 - send UDP discovery beacons
+- listen for UDP discovery beacons from other stations
+- connect to stations heard through discovery, using their advertised TCP port
 - listen on TCP `12070`
 - optionally connect out to known peer IPs
 - send `ECHOREQ`, `CONTESTNAME`, and `STATUS` on new links
@@ -65,9 +67,15 @@ If a real master is already on the network, prefer learning and copying its
 settings without claiming master status:
 
 ```sh
+python3 examples/python/virtual_station.py --mimic-master
+```
+
+This works when the auto-detected `--advertise-ip` is correct and UDP discovery
+reaches the real stations. If either condition is not true, specify the local LAN
+IP and/or a manual peer:
+
+```sh
 python3 examples/python/virtual_station.py \
-  --station N1MMVIRT \
-  --operator N0CALL \
   --advertise-ip 192.0.2.50 \
   --peer 192.0.2.10 \
   --mimic-master
