@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+*.log
+*.pcap
+*.pcapng
+*.exe
+*.dll
+*.zip
+dist/
+build/
+*.egg-info/
