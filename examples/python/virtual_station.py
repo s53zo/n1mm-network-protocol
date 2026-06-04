@@ -62,6 +62,8 @@ class Config:
     is_running: str
     operator_category: str
     transmitter_category: str
+    mimic_master: bool
+    mimic_source_station: str
     is_master: bool
     master_station: str
     peers: list[str]
@@ -93,6 +95,62 @@ class VirtualStation:
         self.selector = selectors.DefaultSelector()
         self.connections: dict[socket.socket, PeerConnection] = {}
         self.lock = threading.Lock()
+        self.learned_master_station = cfg.mimic_source_station or None
+
+    def is_mimic_source(self, station: str) -> bool:
+        return bool(
+            self.cfg.mimic_master
+            and self.learned_master_station
+            and station.upper() == self.learned_master_station.upper()
+        )
+
+    def note_master_station(self, station: str) -> None:
+        if not self.cfg.mimic_master or not station:
+            return
+        with self.lock:
+            previous = self.learned_master_station
+            self.learned_master_station = station
+        if previous != station:
+            logging.warning("mimic source station set to master %s", station)
+
+    def update_identity_from_contestname(self, station: str, fields: tuple[str, ...]) -> None:
+        if not self.is_mimic_source(station):
+            return
+        if len(fields) < 2:
+            return
+        contest = fields[1]
+        subtype = fields[2] if len(fields) > 2 else ""
+        if not contest:
+            return
+        with self.lock:
+            self.cfg.contest = contest
+            self.cfg.contest_subtype = subtype
+        logging.warning("mimicking contest from %s: contest=%s subtype=%s", station, contest, subtype)
+
+    def update_identity_from_status(self, station: str, fields: tuple[str, ...]) -> None:
+        if not self.is_mimic_source(station):
+            return
+        if len(fields) < 11:
+            return
+        with self.lock:
+            self.cfg.pass_freq_x100 = fields[0] or self.cfg.pass_freq_x100
+            self.cfg.current_freq_x100 = fields[1] or self.cfg.current_freq_x100
+            self.cfg.is_running = fields[2] or self.cfg.is_running
+            self.cfg.mode = fields[6] or self.cfg.mode
+            self.cfg.operator_category = fields[7] or self.cfg.operator_category
+            self.cfg.transmitter_category = fields[8] or self.cfg.transmitter_category
+            self.cfg.country_file_version = fields[9] or self.cfg.country_file_version
+            self.cfg.version = fields[10] or self.cfg.version
+        logging.warning(
+            "mimicking status from %s: version=%s contest=%s wl_cty=%s opcat=%s txcat=%s mode=%s",
+            station,
+            self.cfg.version,
+            self.cfg.contest,
+            self.cfg.country_file_version,
+            self.cfg.operator_category,
+            self.cfg.transmitter_category,
+            self.cfg.mode,
+        )
 
     def frame(self, command: str, *fields: str) -> bytes:
         return build_frame(self.cfg.station, command, *fields)
@@ -155,23 +213,34 @@ class VirtualStation:
         date_s, time_s = now_parts()
         logging.info("sending hello to %s reason=%s", conn.name, reason)
         self.send_frame(conn, "ECHOREQ", date_s, time_s)
-        self.send_frame(conn, "CONTESTNAME", self.cfg.station, self.cfg.contest, self.cfg.contest_subtype)
+        with self.lock:
+            contest = self.cfg.contest
+            contest_subtype = self.cfg.contest_subtype
+            pass_freq_x100 = self.cfg.pass_freq_x100
+            current_freq_x100 = self.cfg.current_freq_x100
+            is_running = self.cfg.is_running
+            mode = self.cfg.mode
+            operator_category = self.cfg.operator_category
+            transmitter_category = self.cfg.transmitter_category
+            country_file_version = self.cfg.country_file_version
+            version = self.cfg.version
+        self.send_frame(conn, "CONTESTNAME", self.cfg.station, contest, contest_subtype)
         if self.cfg.is_master:
             self.send_frame(conn, "MASTER", self.cfg.master_station)
         self.send_frame(
             conn,
             "STATUS",
-            self.cfg.pass_freq_x100,
-            self.cfg.current_freq_x100,
-            self.cfg.is_running,
+            pass_freq_x100,
+            current_freq_x100,
+            is_running,
             self.cfg.operator,
             "0",
             "0",
-            self.cfg.mode,
-            self.cfg.operator_category,
-            self.cfg.transmitter_category,
-            self.cfg.country_file_version,
-            self.cfg.version,
+            mode,
+            operator_category,
+            transmitter_category,
+            country_file_version,
+            version,
             "-1",
             "0",
             "0",
@@ -196,8 +265,19 @@ class VirtualStation:
         for conn in conns:
             self.send_bytes(conn, payload, label)
 
-    def respond_to_frame(self, conn: PeerConnection, station: str, command: str, fields: tuple[str, ...]) -> None:
-        logging.info("RX tcp[%s] station=%s command=%s fields=%r", conn.name, station, command, fields)
+    def respond_to_frame(self, conn: PeerConnection | None, station: str, command: str, fields: tuple[str, ...]) -> None:
+        conn_name = conn.name if conn else "none"
+        logging.info("RX tcp[%s] station=%s command=%s fields=%r", conn_name, station, command, fields)
+        if command == "MASTER" and fields:
+            self.note_master_station(fields[0])
+        elif command == "CONTESTNAME":
+            self.update_identity_from_contestname(station, fields)
+        elif command == "STATUS":
+            self.update_identity_from_status(station, fields)
+
+        if conn is None:
+            return
+
         if command == "ECHOREQ":
             date_s = fields[0] if len(fields) > 0 else now_parts()[0]
             time_s = fields[1] if len(fields) > 1 else now_parts()[1]
@@ -205,12 +285,20 @@ class VirtualStation:
         elif command == "IAM":
             self.send_frame(conn, "STOPIAM")
         elif command == "REQCQFREQ":
-            self.send_frame(conn, "CQFREQ", self.cfg.pass_freq_x100)
-            self.send_frame(conn, "FREQ", self.cfg.current_freq_x100)
+            with self.lock:
+                pass_freq_x100 = self.cfg.pass_freq_x100
+                current_freq_x100 = self.cfg.current_freq_x100
+            self.send_frame(conn, "CQFREQ", pass_freq_x100)
+            self.send_frame(conn, "FREQ", current_freq_x100)
         elif command == "REQPASSFREQ":
-            self.send_frame(conn, "PASSFREQ", self.cfg.pass_freq_x100)
+            with self.lock:
+                pass_freq_x100 = self.cfg.pass_freq_x100
+            self.send_frame(conn, "PASSFREQ", pass_freq_x100)
         elif command == "REQCONTESTNAME":
-            self.send_frame(conn, "CONTESTNAME", self.cfg.station, self.cfg.contest, self.cfg.contest_subtype)
+            with self.lock:
+                contest = self.cfg.contest
+                contest_subtype = self.cfg.contest_subtype
+            self.send_frame(conn, "CONTESTNAME", self.cfg.station, contest, contest_subtype)
         elif command == "WHOAREU":
             self.send_frame(conn, "IAM", " 0")
             self.send_hello(conn, "WHOAREU")
@@ -358,6 +446,16 @@ def parse_args(argv: Iterable[str]) -> Config:
     parser.add_argument("--running", action="store_true", help="advertise run/CQ state as true")
     parser.add_argument("--operator-category", default="MULTI-OP")
     parser.add_argument("--transmitter-category", default="ONE")
+    parser.add_argument(
+        "--mimic-master",
+        action="store_true",
+        help="learn contest/version/status identity from the master station and advertise matching values",
+    )
+    parser.add_argument(
+        "--mimic-source-station",
+        default="",
+        help="station name to learn from immediately; if omitted, the first MASTER message selects the source",
+    )
     parser.add_argument("--master", action="store_true", help="send MASTER announcements for this station")
     parser.add_argument("--master-station", help="station name to advertise as master; defaults to --station")
     parser.add_argument("--peer", action="append", default=[], help="peer IP to connect to; repeat for multiple peers")
@@ -389,6 +487,8 @@ def parse_args(argv: Iterable[str]) -> Config:
         is_running="-1" if args.running else "0",
         operator_category=args.operator_category,
         transmitter_category=args.transmitter_category,
+        mimic_master=args.mimic_master,
+        mimic_source_station=args.mimic_source_station,
         is_master=args.master,
         master_station=args.master_station or args.station,
         peers=args.peer,

@@ -55,6 +55,41 @@ python3 examples/python/virtual_station.py \
   --country-file-version CN
 ```
 
+Learn the real master station's visible contest/status identity and mimic those
+values automatically:
+
+```sh
+python3 examples/python/virtual_station.py \
+  --station N1MMVIRT \
+  --operator N0CALL \
+  --advertise-ip 192.0.2.50 \
+  --peer 192.0.2.10 \
+  --mimic-master
+```
+
+With `--mimic-master`, the virtual station watches for `MASTER`, `CONTESTNAME`,
+and `STATUS`. After it learns the master station, it advertises matching:
+
+- N1MM version
+- contest name and subtype
+- country-file version prefix
+- operator category
+- transmitter category
+- mode, run state, and status frequencies
+
+If you already know the master station name, skip waiting for a `MASTER`
+announcement:
+
+```sh
+python3 examples/python/virtual_station.py \
+  --station N1MMVIRT \
+  --operator N0CALL \
+  --advertise-ip 192.0.2.50 \
+  --peer 192.0.2.10 \
+  --mimic-master \
+  --mimic-source-station N1MMA
+```
+
 Mimic a master station with explicit contest/status identity:
 
 ```sh
@@ -75,6 +110,10 @@ python3 examples/python/virtual_station.py \
   --current-freq-x100 1407400 \
   --running
 ```
+
+Use `--master` only if you intentionally want the virtual station to announce
+itself as master. To mimic the master's settings while a real master is present,
+use `--mimic-master` without `--master`.
 
 Ask the running virtual station to send an `XMIT` active/release burst:
 

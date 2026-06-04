@@ -61,6 +61,43 @@ Those options produce:
 - `MASTER%N1MMVIRT%`
 - `STATUS%1407400%1407400%-1%...%MULTI-OP%ONE%CN%1.0.11229.0%...`
 
+If a real master is already on the network, prefer learning and copying its
+settings without claiming master status:
+
+```sh
+python3 examples/python/virtual_station.py \
+  --station N1MMVIRT \
+  --operator N0CALL \
+  --advertise-ip 192.0.2.50 \
+  --peer 192.0.2.10 \
+  --mimic-master
+```
+
+This mode learns from the station named by the next `MASTER` command, then
+copies these values from that station's `CONTESTNAME` and `STATUS` messages:
+
+- N1MM version
+- contest name
+- contest subtype
+- country-file version prefix
+- operator category
+- transmitter category
+- mode
+- run/CQ state
+- pass/CQ and current frequencies
+
+If the master station name is already known, set it directly:
+
+```sh
+python3 examples/python/virtual_station.py \
+  --station N1MMVIRT \
+  --operator N0CALL \
+  --advertise-ip 192.0.2.50 \
+  --peer 192.0.2.10 \
+  --mimic-master \
+  --mimic-source-station N1MMA
+```
+
 ## Six-NUL Payloads
 
 Six all-NUL bytes may appear on TCP links:

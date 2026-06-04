@@ -108,6 +108,12 @@ The sample `virtual_station.py` can advertise these identity/status values:
 - run/CQ state: `--running`
 - master state: `--master`, with optional `--master-station`
 
+It can also learn the real master's values with `--mimic-master`. That mode
+watches for `MASTER`, then copies the named station's `CONTESTNAME` and `STATUS`
+fields into later virtual-station announcements. Use
+`--mimic-source-station <station>` when the master station name is already
+known.
+
 ## Keepalive and Working State
 
 `ECHOREQ` and `ECHO` are the explicit heartbeat pair:

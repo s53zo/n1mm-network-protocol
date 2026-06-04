@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from n1mm_protocol import build_discovery, build_frame, parse_discovery, parse_frames
 from n1mm_protocol.commands import COMMAND_FIELDS, known_commands
-from examples.python.virtual_station import parse_args
+from examples.python.virtual_station import VirtualStation, parse_args
 
 
 class FrameTests(unittest.TestCase):
@@ -95,6 +95,59 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(cfg.pass_freq_x100, "1407400")
         self.assertEqual(cfg.current_freq_x100, "1407400")
         self.assertEqual(cfg.is_running, "-1")
+
+    def test_virtual_station_learns_master_identity_from_master_and_status(self) -> None:
+        cfg = parse_args(["--mimic-master"])
+        app = VirtualStation(cfg)
+
+        app.respond_to_frame(None, "N1MMB", "CONTESTNAME", ("N1MMB", "WRONG", ""))  # type: ignore[arg-type]
+        self.assertEqual(cfg.contest, "CQWPXCW")
+
+        app.respond_to_frame(None, "N1MMA", "MASTER", ("N1MMA",))  # type: ignore[arg-type]
+        app.respond_to_frame(None, "N1MMA", "CONTESTNAME", ("N1MMA", "ARRLDX", "DX"))  # type: ignore[arg-type]
+        app.respond_to_frame(
+            None,
+            "N1MMA",
+            "STATUS",
+            (
+                "1407400",
+                "1407500",
+                "-1",
+                "N0CALL",
+                "10",
+                "100",
+                "CW",
+                "MULTI-OP",
+                "TWO",
+                "ZB",
+                "1.0.99999.0",
+                "-1",
+                "0",
+                "0",
+                "0",
+                "0",
+                "0",
+            ),
+        )  # type: ignore[arg-type]
+
+        self.assertEqual(app.learned_master_station, "N1MMA")
+        self.assertEqual(cfg.contest, "ARRLDX")
+        self.assertEqual(cfg.contest_subtype, "DX")
+        self.assertEqual(cfg.version, "1.0.99999.0")
+        self.assertEqual(cfg.country_file_version, "ZB")
+        self.assertEqual(cfg.transmitter_category, "TWO")
+        self.assertEqual(cfg.pass_freq_x100, "1407400")
+        self.assertEqual(cfg.current_freq_x100, "1407500")
+        self.assertEqual(cfg.is_running, "-1")
+
+    def test_virtual_station_can_preselect_mimic_source_station(self) -> None:
+        cfg = parse_args(["--mimic-master", "--mimic-source-station", "N1MMA"])
+        app = VirtualStation(cfg)
+
+        app.respond_to_frame(None, "N1MMA", "CONTESTNAME", ("N1MMA", "CQWWCW", ""))  # type: ignore[arg-type]
+
+        self.assertEqual(app.learned_master_station, "N1MMA")
+        self.assertEqual(cfg.contest, "CQWWCW")
 
 
 if __name__ == "__main__":
