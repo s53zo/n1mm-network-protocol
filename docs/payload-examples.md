@@ -3,11 +3,17 @@
 The examples use neutral station names and documentation IP addresses. Replace
 them with real LAN values before testing.
 
+These are synthetic layout examples, not captured packets. The layouts were
+checked against application versions `1.0.11364.0` and `1.0.11469.0`; advertised
+versions must match real peers. Checksum values such as `123456` are placeholders,
+not calculated checksums for the sample contacts. See [commands.md](commands.md)
+for compatibility gates and broadcast versus targeted responses.
+
 ## Discovery
 
 ```text
-N1MMA%192.0.2.10%12070%1.0.11229.0%N0CALL%%
-N1MMB%192.0.2.20%12070%1.0.11229.0%N0CALL%vpn-name%
+N1MMA%192.0.2.10%12070%1.0.11469.0%N0CALL%%
+N1MMB%192.0.2.20%12070%1.0.11469.0%N0CALL%vpn-name%
 ```
 
 ## Multi-User TCP Frames
@@ -61,7 +67,7 @@ Command examples:
 | `SKEDSYNC` | `DATA__00%N1MMA%SKEDSYNC%~__DATA` |
 | `STACKCALL` | `DATA__00%N1MMA%STACKCALL%2026-06-02 12:00:00%K1ABC%14074.00%14074.00%CW%CQWPXCW%599%599%K%N0CALL%%%%001%%%0%5%1001%1%0%0%%14.00%K1%%1%N0CALL%%1%0%%NA%%1%%1%0%N1MMA%1%1%11111111111111111111111111111111%1%~__DATA` |
 | `STACKANOTHERCALL` | `DATA__00%N1MMA%STACKANOTHERCALL%K1ABC%~__DATA` |
-| `STATUS` | `DATA__00%N1MMA%STATUS%1407400%1407400%-1%N0CALL%0%0%CW%MULTI-OP%ONE%CN%1.0.11229.0%-1%0%0%0%0%0%~__DATA` |
+| `STATUS` | `DATA__00%N1MMA%STATUS%1407400%1407400%-1%N0CALL%0%0%CW%MULTI-OP%ONE%CN%1.0.11469.0%-1%0%0%0%0%0%~__DATA` |
 | `STOPIAM` | `DATA__00%N1MMA%STOPIAM%~__DATA` |
 | `TIME` | `DATA__00%N1MMA%TIME%2026-06-02 12:00:00%~__DATA` |
 | `TALK` | `DATA__00%N1MMA%TALK%[N1MMA] test message%~__DATA` |
@@ -101,7 +107,8 @@ DATA__00%N1MMA%IAM% 0%~__DATA
 DATA__00%N1MMB%STOPIAM%~__DATA
 ```
 
-Checksum confirmation:
+Checksum confirmation (with logging at all stations enabled and a matching
+contest; checksum values below are placeholders):
 
 ```text
 DATA__00%N1MMA%CHECKSUM%2026-06-02 12:00:00%2026-06-02 13:00:00%123456%CQWPXCW%N0CALL%60%False%False%~__DATA
@@ -267,42 +274,50 @@ Plain ADIF import over WSJT/JTDX UDP or external logging TCP:
 <call:5>K1ABC <band:3>20M <mode:3>FT8 <qso_date:8>20260602 <time_on:6>120000 <rst_sent:3>-10 <rst_rcvd:3>-08 <eor>
 ```
 
-Length-prefixed external logging command:
+Length-prefixed external logging command (the framed `Log` path sends an `ACK`;
+raw ADIF input does not):
 
 ```text
 <command:3>Log<parameters:64><call:5>K1ABC <band:3>20M <mode:3>FT8 <qso_date:8>20260602 <eor>
 ```
 
-WSJT/JTDX radio TCP query/response:
+WSJT/JTDX radio TCP query/response (frequency is kHz, formatted with invariant
+thousands separators and three decimal places):
 
 ```text
 <command:10>CmdGetFreq<parameters:0>
-<CmdFreq:9>14.074000
+<CmdFreq:10>14,074.000
 ```
 
 ```text
 <command:12>CmdGetTXFreq<parameters:0>
-<CmdTXFreq:9>14.074000
+<CmdTXFreq:10>14,074.000
 ```
 
-Radio TCP set/control commands:
+Radio TCP set/control commands reconstructed from the receiver parser. These
+ASCII examples have consistent lengths but have not been exercised against a
+radio. The receiver takes tagged values in positional order; bare numeric
+parameter strings do not satisfy that parser. `CmdSplit` requires lowercase
+`on` or `off`:
 
 ```text
-<command:14>CmdSetFreqMode<parameters:15>14074000>DATA-U
-<command:10>CmdSetFreq<parameters:8>14074000
-<command:12>CmdSetTXFreq<parameters:8>14075000
-<command:10>CmdSetMode<parameters:6>DATA-U
-<command:8>CmdSplit<parameters:2>ON
-<command:11>CmdQSXSplit<parameters:8>14075000
+<command:14>CmdSetFreqMode<parameters:45><xcvrfreq:9>14074.000<mode:6>DATA-U<split:1>N
+<command:10>CmdSetFreq<parameters:21><xcvrfreq:9>14074.000
+<command:12>CmdSetTXFreq<parameters:21><xcvrfreq:9>14075.000
+<command:10>CmdSetMode<parameters:14><mode:6>DATA-U
+<command:8>CmdSplit<parameters:11><split:2>on
+<command:11>CmdQSXSplit<parameters:35><xcvrfreq:9>14075.000<mode:6>DATA-U
 <command:5>CmdRX<parameters:0>
 <command:5>CmdTX<parameters:0>
 ```
 
-JTTY TCP examples:
+JTTY TCP examples (`CALLSIGN` receiver support is present in `1.0.11469.0`
+and absent from the inspected `1.0.11364.0` handler):
 
 ```text
 <RXTEXT:13>CQ K1ABC FN42
 <TXTEXT:7>599 001
+<CALLSIGN:5>K1ABC
 <XMIT:ON>
 <XMIT:OFF>
 <OUTPUTCOMPLETE>

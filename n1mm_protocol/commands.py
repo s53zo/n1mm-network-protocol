@@ -1,4 +1,9 @@
-"""Known multi-user TCP command names and concise field layouts."""
+"""Known multi-user TCP command names and concise field layouts.
+
+Checked against the 1.0.11364.0 and 1.0.11469.0 managed dispatchers. Composite
+contact/serial entries are layout summaries, not one-field wire validators.
+See docs/commands.md for compatibility gates and response destinations.
+"""
 
 COMMAND_FIELDS: dict[str, tuple[str, ...]] = {
     "ADDBLACKLISTCALL": ("callsign",),
@@ -38,7 +43,7 @@ COMMAND_FIELDS: dict[str, tuple[str, ...]] = {
     "REEDITQSO": ("old_timestamp", "old_callsign", "contact_qso_string_43_fields"),
     "REJECTNR": ("old_number",),
     "REMOVECALLSTACKCALLSIGN": ("callsign",),
-    "REQCONTESTNAME": ("station", "unused_token"),
+    "REQCONTESTNAME": ("unused_station", "unused_token"),
     "REQCQFREQ": (),
     "REQPASSFREQ": (),
     "RESERVENR": ("reserved_serial", "freq_x100"),

@@ -32,7 +32,7 @@ Run the tests:
 python3 -m unittest discover -s tests
 ```
 
-Start a passive monitor/virtual station:
+Start a virtual station with unsolicited hello/status bursts disabled:
 
 ```sh
 python3 examples/python/virtual_station.py \
@@ -41,6 +41,14 @@ python3 examples/python/virtual_station.py \
   --advertise-ip 192.0.2.50 \
   --passive
 ```
+
+`--passive` still sends discovery beacons, opens outbound links, answers requests,
+and accepts local control commands. It is not a receive-only packet capture.
+
+Set `--version` to the exact version running on your peers. The default is
+`1.0.11469.0`, matching the inspected update; `--mimic-master` learns identity
+after traffic arrives and does not guarantee admission with a mismatched initial
+version.
 
 By default the virtual station listens for UDP discovery on port `12070` and
 opens outbound TCP links to stations it hears. If the auto-detected
@@ -58,7 +66,7 @@ python3 examples/python/virtual_station.py \
   --operator N0CALL \
   --advertise-ip 192.0.2.50 \
   --peer 192.0.2.10 \
-  --version 1.0.11229.0 \
+  --version 1.0.11469.0 \
   --contest CQWPXCW \
   --country-file-version CN
 ```
@@ -110,7 +118,7 @@ python3 examples/python/virtual_station.py \
   --advertise-ip 192.0.2.50 \
   --peer 192.0.2.10 \
   --master \
-  --version 1.0.11229.0 \
+  --version 1.0.11469.0 \
   --contest CQWPXCW \
   --contest-subtype "" \
   --country-file-version CN \
@@ -138,6 +146,10 @@ Ask the running virtual station to send an `XMIT` active/release burst:
 python3 examples/python/send_xmit_once.py --seconds 3 --macro F1Virtual
 ```
 
+`--advertise-ip` must be an address assigned to a local interface. Discovery
+beacons and outbound TCP links bind it so their source agrees with the
+advertisement.
+
 Use documentation addresses such as `192.0.2.50` only as examples. Replace them
 with addresses from your station LAN.
 
@@ -150,6 +162,8 @@ docs/
   ports.md                 Port matrix and options
   payload-examples.md      Copy-paste command/XML/ADIF examples
   implementation-notes.md  Parser and virtual-station guidance
+  evidence.md              Binary identities, findings, coverage and limitations
+  integrations.md          Adjacent interfaces and version differences
 examples/python/
   parse_frame.py           DATA frame parser CLI
   virtual_station.py       Minimal virtual station / protocol monitor
@@ -180,9 +194,10 @@ Important caveats:
 
 - TCP is a byte stream. One `recv()` may contain a partial frame, one frame, or
   multiple frames.
-- Six-byte all-NUL TCP payloads have been observed. Their exact role is not
-  proven here. Parsers should tolerate and ignore them. The sample virtual
-  station only sends them when `--six-nul-response` is enabled.
+- Six-byte all-NUL payloads were described in the earlier reference, but their
+  origin and role were not confirmed in this static review. The parser discards
+  them outside frames; `--six-nul-response` remains an experimental opt-in, not
+  a verified protocol requirement.
 - `REQCONTESTNAME`, `SKEDSYNC`, and `WHOAREU` are receiver-supported commands,
   but no current sender path is known.
 - QSO-writing commands can affect an N1MM log. Do not send `QSO`, `REEDITQSO`,
@@ -190,6 +205,10 @@ Important caveats:
   unless you intentionally want that behavior.
 
 ## Documentation
+
+The reference was checked statically against builds `1.0.11364.0` and
+`1.0.11469.0`; see [evidence and limitations](docs/evidence.md). No live N1MM
+interoperability test was performed.
 
 Start with [docs/protocol.md](docs/protocol.md), then use
 [docs/commands.md](docs/commands.md) and

@@ -72,7 +72,12 @@ def parse_frames(buffer: bytes) -> tuple[list[Frame], bytes]:
     while True:
         start = buffer.find(DATA_PREFIX, pos)
         if start < 0:
-            return frames, buffer[pos:][-len(DATA_PREFIX) :]
+            # Keep only a possible split marker, not arbitrary noise/NULs.
+            tail = buffer[pos:]
+            for length in range(min(len(tail), len(DATA_PREFIX) - 1), 0, -1):
+                if tail.endswith(DATA_PREFIX[:length]):
+                    return frames, tail[-length:]
+            return frames, b""
 
         end = buffer.find(DATA_SUFFIX, start)
         if end < 0:
@@ -81,7 +86,7 @@ def parse_frames(buffer: bytes) -> tuple[list[Frame], bytes]:
         body = buffer[start + len(DATA_PREFIX) : end]
         text = body.decode("utf-8", errors="replace")
         tokens = text.split("%")
-        if len(tokens) >= 3 and len(tokens[0]) == 2 and tokens[0].isdigit():
+        if len(tokens) >= 3 and len(tokens[0]) == 2 and all("0" <= char <= "9" for char in tokens[0]):
             station_number = int(tokens[0])
             station = tokens[1]
             command = tokens[2].upper()

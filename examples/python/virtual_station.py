@@ -87,6 +87,12 @@ class PeerConnection:
     outgoing: bool
     recv_buffer: bytes = b""
     last_hello: float = field(default_factory=lambda: 0.0)
+    send_buffer: bytes = b""
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
+    peer_ip: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.peer_ip = self.sock.getpeername()[0]
 
 
 class VirtualStation:
@@ -98,6 +104,7 @@ class VirtualStation:
         self.lock = threading.Lock()
         self.learned_master_station = cfg.mimic_source_station or None
         self.dynamic_peers: dict[str, int] = {peer: cfg.port for peer in cfg.peers}
+        self.pending_replies: dict[str, list[tuple[bytes, str]]] = {}
 
     def is_mimic_source(self, station: str) -> bool:
         return bool(
@@ -194,14 +201,33 @@ class VirtualStation:
         signal.signal(signal.SIGTERM, handler)
 
     def add_connection(self, sock: socket.socket, name: str, outgoing: bool) -> None:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setblocking(False)
-        conn = PeerConnection(sock=sock, name=name, outgoing=outgoing)
-        with self.lock:
-            self.connections[sock] = conn
-        self.selector.register(sock, selectors.EVENT_READ, self.handle_readable)
-        logging.info("opened tcp[%s] outgoing=%s local=%s remote=%s", name, outgoing, sock.getsockname(), sock.getpeername())
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setblocking(False)
+            conn = PeerConnection(sock=sock, name=name, outgoing=outgoing)
+            local_addr = sock.getsockname()
+            remote_addr = sock.getpeername()
+            with self.lock:
+                # Registration must precede publication: a response/control
+                # producer may immediately try to modify the writer's events.
+                # Check shutdown in the same critical section so its socket
+                # snapshot cannot miss a connection that is still being added.
+                if self.stop_event.is_set():
+                    sock.close()
+                    return
+                self.selector.register(sock, selectors.EVENT_READ, self.handle_connection_events)
+                self.connections[sock] = conn
+        except (OSError, KeyError, ValueError) as exc:
+            logging.error("opening tcp[%s] failed: %s", name, exc)
+            sock.close()
+            return
+        logging.info("opened tcp[%s] outgoing=%s local=%s remote=%s", name, outgoing, local_addr, remote_addr)
         self.send_hello(conn, "new-connection")
+        if outgoing:
+            with self.lock:
+                pending = self.pending_replies.pop(conn.peer_ip, [])
+            for payload, label in pending:
+                self.send_bytes(conn, payload, label)
 
     def close_connection(self, sock: socket.socket) -> None:
         with self.lock:
@@ -218,18 +244,59 @@ class VirtualStation:
             logging.warning("closed tcp[%s]", conn.name)
 
     def send_bytes(self, conn: PeerConnection, payload: bytes, label: str) -> None:
+        # Several producer threads share each nonblocking writer. Keep partial
+        # writes and serialize whole frames so TCP backpressure cannot truncate
+        # a frame or interleave it with a heartbeat/XMIT burst.
+        with conn.send_lock:
+            conn.send_buffer += payload
+        logging.info("TX tcp[%s] %s %r", conn.name, label, preview(payload))
+        self.flush_writes(conn)
+
+    def flush_writes(self, conn: PeerConnection) -> None:
         try:
-            conn.sock.sendall(payload)
-            logging.info("TX tcp[%s] %s %r", conn.name, label, preview(payload))
-        except OSError as exc:
+            with conn.send_lock:
+                while conn.send_buffer:
+                    try:
+                        sent = conn.sock.send(conn.send_buffer)
+                    except BlockingIOError:
+                        break
+                    if sent == 0:
+                        raise ConnectionError("socket closed during write")
+                    conn.send_buffer = conn.send_buffer[sent:]
+                events = selectors.EVENT_READ
+                if conn.send_buffer:
+                    events |= selectors.EVENT_WRITE
+                self.selector.modify(conn.sock, events, self.handle_connection_events)
+        except (OSError, KeyError, ValueError) as exc:
             logging.error("TX tcp[%s] failed: %s", conn.name, exc)
             self.close_connection(conn.sock)
+
+    def handle_connection_events(self, sock: socket.socket, mask: int) -> None:
+        if mask & selectors.EVENT_READ:
+            self.handle_readable(sock)
+        conn = self.connections.get(sock)
+        if conn and mask & selectors.EVENT_WRITE:
+            self.flush_writes(conn)
+
+    def send_reply(self, received_on: PeerConnection, command: str, *fields: str) -> None:
+        # N1MM reads DATA messages on the connection initiated by the sender.
+        # Reply on our outgoing half of that peer's pair, never its inbound
+        # writer connection. Discovery/the connector may not have opened it yet.
+        peer_ip = received_on.peer_ip
+        payload = self.frame(command, *fields)
+        with self.lock:
+            writer = next((candidate for candidate in self.connections.values()
+                           if candidate.outgoing and candidate.peer_ip == peer_ip), None)
+            if writer is None:
+                self.pending_replies.setdefault(peer_ip, []).append((payload, command))
+        if writer is not None:
+            self.send_bytes(writer, payload, command)
 
     def send_frame(self, conn: PeerConnection, command: str, *fields: str) -> None:
         self.send_bytes(conn, self.frame(command, *fields), command)
 
     def send_hello(self, conn: PeerConnection, reason: str) -> None:
-        if self.cfg.passive:
+        if self.cfg.passive or not conn.outgoing:
             return
         date_s, time_s = now_parts()
         logging.info("sending hello to %s reason=%s", conn.name, reason)
@@ -281,8 +348,6 @@ class VirtualStation:
     def broadcast_to_peer_links(self, payload: bytes, label: str) -> None:
         with self.lock:
             conns = [conn for conn in self.connections.values() if conn.outgoing]
-            if not conns:
-                conns = list(self.connections.values())
         for conn in conns:
             self.send_bytes(conn, payload, label)
 
@@ -299,30 +364,47 @@ class VirtualStation:
         if conn is None:
             return
 
-        if command == "ECHOREQ":
+        if command == "DISCONNECT_ME":
+            peer_ip = conn.peer_ip
+            with self.lock:
+                if peer_ip not in self.cfg.peers:
+                    self.dynamic_peers.pop(peer_ip, None)
+                self.pending_replies.pop(peer_ip, None)
+                sockets = [candidate.sock for candidate in self.connections.values()
+                           if candidate.peer_ip == peer_ip]
+            for sock in sockets:
+                self.close_connection(sock)
+        elif command == "ECHOREQ":
             date_s = fields[0] if len(fields) > 0 else now_parts()[0]
             time_s = fields[1] if len(fields) > 1 else now_parts()[1]
-            self.send_frame(conn, "ECHO", date_s, time_s)
+            self.send_reply(conn, "ECHO", date_s, time_s)
         elif command == "IAM":
-            self.send_frame(conn, "STOPIAM")
+            self.send_reply(conn, "STOPIAM")
         elif command == "REQCQFREQ":
             with self.lock:
                 pass_freq_x100 = self.cfg.pass_freq_x100
                 current_freq_x100 = self.cfg.current_freq_x100
-            self.send_frame(conn, "CQFREQ", pass_freq_x100)
-            self.send_frame(conn, "FREQ", current_freq_x100)
+            self.broadcast_to_peer_links(self.frame("CQFREQ", pass_freq_x100), "CQFREQ")
+            self.broadcast_to_peer_links(self.frame("FREQ", current_freq_x100), "FREQ")
         elif command == "REQPASSFREQ":
             with self.lock:
                 pass_freq_x100 = self.cfg.pass_freq_x100
-            self.send_frame(conn, "PASSFREQ", pass_freq_x100)
+            self.broadcast_to_peer_links(self.frame("PASSFREQ", pass_freq_x100), "PASSFREQ")
         elif command == "REQCONTESTNAME":
             with self.lock:
                 contest = self.cfg.contest
                 contest_subtype = self.cfg.contest_subtype
-            self.send_frame(conn, "CONTESTNAME", self.cfg.station, contest, contest_subtype)
+            self.send_reply(conn, "CONTESTNAME", station, contest, contest_subtype)
         elif command == "WHOAREU":
-            self.send_frame(conn, "IAM", " 0")
-            self.send_hello(conn, "WHOAREU")
+            self.send_reply(conn, "IAM", " 0")
+            date_s, time_s = now_parts()
+            with self.lock:
+                current_freq = self.cfg.current_freq_x100
+            self.broadcast_to_peer_links(self.frame("ECHOREQ", date_s, time_s), "ECHOREQ")
+            self.broadcast_to_peer_links(self.frame("FREQ", current_freq), "FREQ")
+            # This virtual station owns no log, so its last-QSO time is the
+            # empty-log sentinel, never a copied master's timestamp.
+            self.send_reply(conn, "LASTQAT", "1900-01-01 00:00:00")
 
     def handle_readable(self, sock: socket.socket) -> None:
         conn = self.connections.get(sock)
@@ -330,6 +412,8 @@ class VirtualStation:
             return
         try:
             data = sock.recv(65535)
+        except BlockingIOError:
+            return
         except OSError as exc:
             logging.error("RX tcp[%s] failed: %s", conn.name, exc)
             self.close_connection(sock)
@@ -345,6 +429,8 @@ class VirtualStation:
         conn.recv_buffer += data
         frames, conn.recv_buffer = parse_frames(conn.recv_buffer)
         for frame in frames:
+            if self.connections.get(sock) is not conn:
+                break
             if self.cfg.send_null_response:
                 self.send_bytes(conn, ALL_NUL_PAYLOAD, "six-NUL-compat")
             self.respond_to_frame(conn, frame.station, frame.command, frame.fields)
@@ -378,7 +464,10 @@ class VirtualStation:
                 if name in names:
                     continue
                 try:
-                    sock = socket.create_connection((peer, port), timeout=5.0)
+                    sock = socket.create_connection(
+                        (peer, port), timeout=5.0,
+                        source_address=(self.cfg.advertise_ip, 0),
+                    )
                     self.add_connection(sock, name, outgoing=True)
                 except OSError as exc:
                     logging.info("connect %s failed: %s", name, exc)
@@ -388,6 +477,9 @@ class VirtualStation:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
+            # Native discovery learns our packet source, not its advertised IP.
+            # Select the intended local interface so those addresses agree.
+            sock.bind((self.cfg.advertise_ip, 0))
             while not self.stop_event.is_set():
                 payload = self.discovery_payload()
                 for host in self.cfg.broadcasts:
@@ -448,10 +540,12 @@ class VirtualStation:
     def selector_loop(self) -> None:
         while not self.stop_event.is_set():
             for key, _mask in self.selector.select(timeout=1.0):
-                key.data(key.fileobj)
+                key.data(key.fileobj, _mask)
             now = time.time()
-            for conn in list(self.connections.values()):
-                if now - conn.last_hello >= self.cfg.hello_interval:
+            with self.lock:
+                conns = list(self.connections.values())
+            for conn in conns:
+                if conn.outgoing and now - conn.last_hello >= self.cfg.hello_interval:
                     self.send_hello(conn, "periodic")
 
     def run(self) -> None:
@@ -469,8 +563,12 @@ class VirtualStation:
             self.selector_loop()
         finally:
             self.stop_event.set()
-            for sock in list(self.connections):
+            self.broadcast_to_peer_links(self.frame("DISCONNECT_ME"), "DISCONNECT_ME")
+            with self.lock:
+                sockets = list(self.connections)
+            for sock in sockets:
                 self.close_connection(sock)
+            self.selector.close()
 
 
 def parse_args(argv: Iterable[str]) -> Config:
@@ -478,9 +576,9 @@ def parse_args(argv: Iterable[str]) -> Config:
     parser.add_argument("--station", default="N1MMVIRT")
     parser.add_argument("--operator", default="N0CALL")
     parser.add_argument("--bind-ip", default="0.0.0.0")
-    parser.add_argument("--advertise-ip", default=guess_local_ip())
+    parser.add_argument("--advertise-ip", help="local interface address for discovery source/advertisement; auto-detected when omitted")
     parser.add_argument("--port", type=int, default=12070)
-    parser.add_argument("--version", default="1.0.11229.0")
+    parser.add_argument("--version", default="1.0.11469.0", help="must exactly match real peers for discovery admission")
     parser.add_argument("--contest", default="CQWPXCW")
     parser.add_argument("--contest-subtype", default="")
     parser.add_argument("--country-file-version", default="CN", help="wl_cty.dat version prefix advertised in STATUS")
@@ -505,12 +603,12 @@ def parse_args(argv: Iterable[str]) -> Config:
     parser.add_argument("--peer", action="append", default=[], help="peer IP to connect to; repeat for multiple peers")
     parser.add_argument("--broadcast", action="append", default=["255.255.255.255"], help="UDP discovery destination")
     parser.add_argument("--beacon-interval", type=float, default=10.0)
-    parser.add_argument("--hello-interval", type=float, default=30.0)
+    parser.add_argument("--hello-interval", type=float, default=10.0, help="seconds between hello/status bursts; keep below the peer working-state window (20 seconds)")
     parser.add_argument("--reconnect-interval", type=float, default=5.0)
     parser.add_argument("--no-auto-discover", action="store_true", help="do not listen for UDP discovery and auto-connect heard stations")
-    parser.add_argument("--passive", action="store_true", help="monitor only; do not send hello/status bursts")
+    parser.add_argument("--passive", action="store_true", help="suppress unsolicited hello/status bursts; discovery, request replies and control remain active")
     parser.add_argument("--no-connect-out", action="store_true", help="do not open outbound TCP peer links")
-    parser.add_argument("--six-nul-response", action="store_true", help="send observed six-NUL compatibility bytes after DATA frames")
+    parser.add_argument("--six-nul-response", action="store_true", help="experimental: send six-NUL bytes after DATA frames; not a verified protocol requirement")
     parser.add_argument("--control-ip", default="127.0.0.1")
     parser.add_argument("--control-port", type=int, default=12071)
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -520,7 +618,7 @@ def parse_args(argv: Iterable[str]) -> Config:
         station=args.station,
         operator=args.operator,
         bind_ip=args.bind_ip,
-        advertise_ip=args.advertise_ip,
+        advertise_ip=args.advertise_ip or guess_local_ip(),
         port=args.port,
         version=args.version,
         contest=args.contest,

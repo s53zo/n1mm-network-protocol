@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,35 @@ from examples.python.virtual_station import VirtualStation, parse_args
 
 
 class FrameTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Argument parsing must not probe the host network during unit tests.
+        probe = patch("examples.python.virtual_station.guess_local_ip", return_value="192.0.2.50")
+        probe.start()
+        self.addCleanup(probe.stop)
+
+    def test_every_tcp_split_preserves_utf8_and_frame_markers(self) -> None:
+        payload = build_frame("N1MMA", "TALK", "Živjo") + build_frame("N1MMB", "ECHO", "date", "time")
+        for split in range(len(payload) + 1):
+            with self.subTest(split=split):
+                first, remainder = parse_frames(payload[:split])
+                second, remainder = parse_frames(remainder + payload[split:])
+                self.assertEqual([frame.tokens for frame in first + second], [
+                    ("N1MMA", "TALK", "Živjo"), ("N1MMB", "ECHO", "date", "time"),
+                ])
+                self.assertEqual(remainder, b"")
+
+    def test_noise_and_nuls_are_discarded_except_split_prefix(self) -> None:
+        for noise in (b"\x00" * 6, b"garbage", b"noiseDATA_", b"\x00D"):
+            with self.subTest(noise=noise):
+                frames, remainder = parse_frames(noise)
+                self.assertEqual(frames, [])
+                expected = b"DATA_" if noise.endswith(b"DATA_") else b"D" if noise.endswith(b"D") else b""
+                self.assertEqual(remainder, expected)
+        payload = build_frame("N1MMA", "IAM", " 0")
+        frames, remainder = parse_frames(b"\x00" * 6 + payload + b"\x00" * 6)
+        self.assertEqual(frames[0].command, "IAM")
+        self.assertEqual(remainder, b"")
+
     def test_build_frame_uses_n1mm_envelope(self) -> None:
         frame = build_frame("N1MMA", "XMIT", "-1", "F1Virtual", "0", "0", "0")
         self.assertEqual(frame, b"DATA__00%N1MMA%XMIT%-1%F1Virtual%0%0%0%~__DATA")
@@ -47,6 +77,15 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(frames[0].station_number, 12)
         self.assertEqual(frames[0].tokens, ("N1MMA", "FREQ", "1407400"))
 
+    def test_non_ascii_station_numbers_are_rejected_without_losing_next_frame(self) -> None:
+        valid = build_frame("N1MMB", "ECHO", "date", "time")
+        for station_number in ("²²", "١٢", "１２"):
+            with self.subTest(station_number=station_number):
+                malformed = f"DATA__{station_number}%N1MMA%IAM% 0%~__DATA".encode("utf-8")
+                frames, remainder = parse_frames(malformed + valid)
+                self.assertEqual([frame.tokens for frame in frames], [("N1MMB", "ECHO", "date", "time")])
+                self.assertEqual(remainder, b"")
+
     def test_discovery_roundtrip(self) -> None:
         payload = build_discovery("N1MMA", "192.0.2.10", 12070, "1.0.11229.0", "N0CALL")
         self.assertEqual(payload, b"N1MMA%192.0.2.10%12070%1.0.11229.0%N0CALL%%")
@@ -69,6 +108,32 @@ class FrameTests(unittest.TestCase):
         text = (ROOT / "docs" / "payload-examples.md").read_text(encoding="utf-8")
         self.assertIn("<command:3>Log<parameters:64>", text)
         self.assertNotIn("LoggedADIF", text)
+
+    def test_external_command_examples_have_consistent_declared_lengths(self) -> None:
+        text = (ROOT / "docs" / "payload-examples.md").read_text(encoding="utf-8")
+        records = re.findall(r"^<command:(\d+)>(.*?)<parameters:(\d+)>(.*)$", text, re.MULTILINE)
+        self.assertTrue(records)
+        for command_size, command, parameter_size, parameters in records:
+            with self.subTest(command=command):
+                self.assertEqual(int(command_size), len(command))
+                self.assertEqual(int(parameter_size), len(parameters))
+        for size, frequency in re.findall(r"^<Cmd(?:TX)?Freq:(\d+)>(.*)$", text, re.MULTILINE):
+            self.assertEqual(int(size), len(frequency))
+
+    def test_documented_composite_contact_frames_have_complete_field_layouts(self) -> None:
+        text = (ROOT / "docs" / "payload-examples.md").read_text(encoding="utf-8")
+        expected = {"QSO": 44, "REEDITQSO": 45, "RESYNCQSO": 44, "STACKCALL": 43,
+                    "QSONRS": 33, "STATUS": 17, "XMIT": 5}
+        seen = set()
+        for payload in re.findall(r"DATA__\d\d%[^`\n]+?%~__DATA", text):
+            parsed, remainder = parse_frames(payload.encode("utf-8"))
+            self.assertFalse(remainder)
+            for frame in parsed:
+                if frame.command in expected:
+                    seen.add(frame.command)
+                    with self.subTest(command=frame.command):
+                        self.assertEqual(len(frame.fields), expected[frame.command])
+        self.assertEqual(seen, set(expected))
 
     def test_virtual_station_master_identity_options(self) -> None:
         cfg = parse_args([
